@@ -26,13 +26,22 @@ class FBeta(Metric):
             initializer='zeros')
 
     def update_state(self, y_true, y_pred, sample_weight=None):
+        # 1. Ensure y_true is an integer
+        y_true = tf.cast(y_true, tf.int32)
+        
+        # 2. Squeeze the last dimension: (None, 300, 300, 1) -> (None, 300, 300)
+        y_true = tf.squeeze(y_true, axis=-1)
+        
+        # 3. Convert sparse integers to one-hot encoding to match y_pred
+        y_true_onehot = tf.one_hot(y_true, depth=tf.shape(y_pred)[-1])
+
         return metrics_utils.update_confusion_matrix_variables(
             {
                 metrics_utils.ConfusionMatrix.TRUE_POSITIVES: self.true_positives,
                 metrics_utils.ConfusionMatrix.FALSE_POSITIVES: self.false_positives,
                 metrics_utils.ConfusionMatrix.FALSE_NEGATIVES: self.false_negatives,
             },
-            y_true,
+            y_true_onehot,
             y_pred,
             thresholds=[metrics_utils.NEG_INF],
             top_k=1,

@@ -1,6 +1,6 @@
 from keras import Sequential
 from keras.layers import Layer, RandomFlip, RandomRotation
-from keras.utils import Sequence, to_categorical
+from keras.utils import Sequence
 from PIL import Image
 
 from pathlib import Path
@@ -127,7 +127,14 @@ def load_img(fname):
     return np.array(Image.open(fname))
 
 def mask_to_classes(mask):
-    return to_categorical(mask[:,:,0], 6)
+    """Return integer class map suitable for sparse categorical loss.
+
+    Ensures a single-channel integer map with values 0..5 and shape HxWx1.
+    """
+    # If mask has channel dim, assume class ids are in channel 0
+    if mask.ndim == 3:
+        mask = mask[..., 0]
+    return mask.astype('int32')[..., np.newaxis]
 
 class SegmentationSequence(Sequence):
     def __init__(self, dataset, image_files, eleva_files, image_augmenter, label_augmenter, bs, use_elevation=True):

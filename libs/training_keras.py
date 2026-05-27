@@ -1,4 +1,4 @@
-from keras import optimizers, metrics
+from keras import optimizers, metrics, losses
 from libs import datasets_keras
 from libs.config import USE_ELEVATION
 from libs.util_keras import FBeta
@@ -12,12 +12,8 @@ def train_model(dataset, model, use_elevation=USE_ELEVATION):
 
     model.compile(
         optimizer=optimizers.Adam(learning_rate=lr),
-        loss='categorical_crossentropy',
-        metrics=[
-            metrics.Precision(top_k=1, name='precision'),
-            metrics.Recall(top_k=1, name='recall'),
-            FBeta(name='f_beta')
-        ]
+        loss=losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=['Accuracy']
     )
 
     train_data, valid_data = datasets_keras.load_dataset(dataset, bs, use_elevation=use_elevation)
