@@ -5,29 +5,9 @@ from libs import scoring
 from libs import images2chips
 from libs.config import USE_ELEVATION
 import os
-import tensorflow as tf
-
-
+import keras
 
 if __name__ == '__main__':
-    # Optional: restrict visible GPUs (set to comma-separated indices), or leave unset to use all
-    # os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-
-    # Print devices
-    print("Physical GPUs:", tf.config.list_physical_devices('GPU'))
-
-    # Enable memory growth to avoid TF grabbing all GPU memory
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-        except Exception as e:
-            print("Failed to set memory growth:", e)
-
-    # Optional: log device placement for debugging
-    # tf.debugging.set_log_device_placement(True)
-
     dataset = 'data'
 
     image_chips = f'{dataset}/image-chips'
@@ -50,7 +30,7 @@ if __name__ == '__main__':
     )
     
     # plot model architecture
-    tf.keras.utils.plot_model(model, to_file='model_architecture.png', show_shapes=True, dpi=100)
+    keras.utils.plot_model(model, to_file='model_architecture.png', show_shapes=True, dpi=100)
     print("Model architecture saved to model_architecture.png")
     
     training_keras.train_model(dataset, model, use_elevation=USE_ELEVATION)
