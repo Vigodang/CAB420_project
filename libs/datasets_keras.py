@@ -1,4 +1,5 @@
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from keras import Sequential
+from keras.layers import Layer, RandomFlip, RandomRotation
 from keras.utils import Sequence, to_categorical
 from PIL import Image
 
@@ -6,15 +7,24 @@ from pathlib import Path
 import numpy as np
 import random
 
-def load_dataset(dataset, bs, aug={'horizontal_flip': True, 'vertical_flip': True, 'rotation_range': 180}):
+BASE_AUGMENTATION = Sequential([
+    RandomFlip('horizontal_and_vertical'),
+    RandomRotation(0.5, interpolation='bilinear', fill_mode='reflect')
+])
+
+def load_dataset(dataset, bs, aug=BASE_AUGMENTATION):
     train_image_files, train_eleva_files = _expand_split_chips(dataset, 'train.txt')
     valid_image_files, valid_eleva_files = _expand_split_chips(dataset, 'valid.txt')
+
+    image_augmenter = _resolve_augmentation(aug)
+    label_augmenter = _build_label_augmentation(image_augmenter)
     
     train_seq = SegmentationSequence(
         dataset,
         train_image_files,
         train_eleva_files,
-        ImageDataGenerator(**aug),
+        image_augmenter,
+        label_augmenter,
         bs
     )
     
@@ -22,11 +32,53 @@ def load_dataset(dataset, bs, aug={'horizontal_flip': True, 'vertical_flip': Tru
         dataset,
         valid_image_files,
         valid_eleva_files,
-        ImageDataGenerator(), # don't augment validation set
+        None,  # don't augment validation set
+        None,
         bs
     )
     
     return train_seq, valid_seq
+
+
+def _resolve_augmentation(aug):
+    if aug is False or aug == [] or aug is None:
+        return None
+
+    if isinstance(aug, Sequential):
+        return aug
+
+    raise ValueError('aug must be None, False, an empty list, or a keras.Sequential instance')
+
+
+def _is_label_safe_layer(layer):
+    name = layer.__class__.__name__
+    return name in {
+        'RandomFlip',
+        'RandomRotation',
+        'RandomTranslation',
+        'RandomZoom',
+        'RandomCrop',
+        'CenterCrop'
+    }
+
+
+def _clone_layer_for_labels(layer):
+    config = layer.get_config()
+    if 'interpolation' in config:
+        config['interpolation'] = 'nearest'
+    return layer.__class__.from_config(config)
+
+
+def _build_label_augmentation(image_augmenter):
+    if image_augmenter is None:
+        return None
+
+    safe_layers = []
+    for layer in image_augmenter.layers:
+        if _is_label_safe_layer(layer):
+            safe_layers.append(_clone_layer_for_labels(layer))
+
+    return Sequential(safe_layers) if safe_layers else None
 
 
 def _resolve_split_file(dataset, filename):
@@ -74,7 +126,7 @@ def mask_to_classes(mask):
     return to_categorical(mask[:,:,0], 6)
 
 class SegmentationSequence(Sequence):
-    def __init__(self, dataset, image_files, eleva_files, datagen, bs):
+    def __init__(self, dataset, image_files, eleva_files, image_augmenter, label_augmenter, bs):
         assert len(image_files) == len(eleva_files), 'image and eleva chip counts must match'
 
         self.label_path = f'{dataset}/label-chips'
@@ -83,7 +135,8 @@ class SegmentationSequence(Sequence):
         self.samples = list(zip(image_files, eleva_files))
         random.shuffle(self.samples)
 
-        self.datagen = datagen
+        self.image_augmenter = image_augmenter
+        self.label_augmenter = label_augmenter
         self.bs = bs
 
     def __len__(self):
@@ -100,12 +153,15 @@ class SegmentationSequence(Sequence):
         labels = [mask_to_classes(load_img(fname)) for fname in label_files]
 
         images = [self._stack_elevation(im, el) for im, el in zip(images, elevas)]
+        images = np.array(images)
+        labels = np.array(labels)
 
-        ts = [self.datagen.get_random_transform(im.shape) for im in images]
-        images = [self.datagen.apply_transform(im, ts) for im, ts in zip(images, ts)]
-        labels = [self.datagen.apply_transform(im, ts) for im, ts in zip(labels, ts)]
+        if self.image_augmenter is not None and self.label_augmenter is not None:
+            seed = random.randint(0, 2**31 - 1)
+            images = self.image_augmenter(images, training=True, seed=seed).numpy()
+            labels = self.label_augmenter(labels, training=True, seed=seed).numpy()
 
-        return np.array(images), np.array(labels)
+        return images, labels
 
     def _stack_elevation(self, image, eleva):
         if eleva.ndim == 2:
