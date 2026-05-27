@@ -53,7 +53,7 @@ def build(size=300, basef=64, maxf=512, encoder='resnet50', pretrained=True, ima
         x = conv(x, nf)
         x = act(x)
 
-    x = tf.keras.layers.Conv2D(6, kernel_size=(1, 1), activation=None)(x)
+    x = x = layers.Conv2D(6, 1, padding='same', activation='linear', name='seg_output')(x)
     # Resize to match input spatial resolution robustly
     x = layers.Lambda(lambda t: tf.image.resize(t, (size, size), method='bilinear'))(x)
 
