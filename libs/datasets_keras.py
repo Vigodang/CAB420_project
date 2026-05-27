@@ -1,6 +1,6 @@
 from keras import Sequential
 from keras.layers import Layer, RandomFlip, RandomRotation
-from keras.utils import Sequence, to_categorical
+from keras.utils import Sequence
 from PIL import Image
 
 from pathlib import Path
@@ -126,24 +126,15 @@ def load_lines(fname):
 def load_img(fname):
     return np.array(Image.open(fname))
 
-def mask_to_classes(mask, fname=None, num_classes=6):
+def mask_to_classes(mask):
+    """Return integer class map suitable for sparse categorical loss.
+
+    Ensures a single-channel integer map with values 0..5 and shape HxWx1.
+    """
+    # If mask has channel dim, assume class ids are in channel 0
     if mask.ndim == 3:
-        mask = mask[:, :, 0]
-
-    mask = mask.astype(np.int64)
-    values = np.unique(mask)
-    bad_values = values[(values < 0) | (values >= num_classes)]
-
-    if bad_values.size > 0:
-        raise ValueError(
-            f'{fname or "mask"} contains invalid class IDs '
-            f'{bad_values[:20].tolist()} '
-            f'(min={mask.min()}, max={mask.max()}). '
-            f'Expected only 0..{num_classes - 1}.'
-        )
-
-    return to_categorical(mask, num_classes)
-
+        mask = mask[..., 0]
+    return mask.astype('int32')[..., np.newaxis]
 
 class SegmentationSequence(Sequence):
     def __init__(self, dataset, image_files, eleva_files, image_augmenter, label_augmenter, bs, use_elevation=True):
@@ -176,7 +167,8 @@ class SegmentationSequence(Sequence):
             image_files = batch
             eleva_files = []
 
-        label_files = [str(self.label_path / Path(fname).name) for fname in image_files]
+        label_files = [fname.replace(self.image_path, self.label_path) for fname in image_files]
+
         images = [load_img(fname) for fname in image_files]
         if self.use_elevation:
             elevas = [load_img(fname) for fname in eleva_files]
