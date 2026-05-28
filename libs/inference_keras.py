@@ -34,7 +34,7 @@ def chips_from_image(img, size=300):
             chips.append((chip, x, y))
     return chips
 
-def run_inference_on_file(imagefile, predsfile, model, size=300, use_elevation=False, elevafile=None):
+def run_inference_on_file(imagefile, predsfile, model, size=300, use_elevation=True, elevafile=None):
     with Image.open(imagefile).convert('RGB') as img:
         nimg = np.array(img)
         shape = nimg.shape
@@ -71,7 +71,11 @@ def run_inference_on_file(imagefile, predsfile, model, size=300, use_elevation=F
         raise ValueError(f'No valid chips generated for {imagefile}')
 
     prediction = np.zeros(shape[:2], dtype='uint8')
-    chip_preds = model.predict(np.array([chip for chip, _, _ in chips]), verbose=True)
+    #chip_preds = model.predict(np.array([chip for chip, _, _ in chips]), verbose=True)
+    images = np.array([chip[..., :3] for chip, _, _ in chips])
+    elevas = np.array([chip[..., 3:] for chip, _, _ in chips])
+
+    chip_preds = model.predict([images, elevas], verbose=True)
 
     for (chip, x, y), pred in zip(chips, chip_preds):
         category_chip = np.argmax(pred, axis=-1) + 1
@@ -81,7 +85,7 @@ def run_inference_on_file(imagefile, predsfile, model, size=300, use_elevation=F
     mask = category2mask(prediction)
     Image.fromarray(mask).save(predsfile)
 
-def run_inference(dataset, model=None, model_path=None, basedir='predictions', use_elevation=None):
+def run_inference(dataset, model=None, model_path=None, basedir='predictions', use_elevation=True):
     if not os.path.isdir(basedir):
         os.mkdir(basedir)
     if model is None and model_path is None:

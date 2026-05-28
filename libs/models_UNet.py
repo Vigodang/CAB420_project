@@ -2,7 +2,7 @@ from keras import layers, models
 import numpy as np
 import tensorflow as tf
 
-def build(size=300, basef=64, maxf=512, encoder='resnet50', pretrained=True, image_channels=3, use_elevation=False):
+def build(size=300, basef=64, maxf=512, encoder='resnet50', pretrained=True, image_channels=3, use_elevation=True):
     input_img = layers.Input((size, size, image_channels), name='image_input')
     inputs = input_img
 
