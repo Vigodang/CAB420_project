@@ -21,19 +21,20 @@ if __name__ == '__main__':
         print('Chips already exist, skipping chip generation')
     else:
         images2chips.run(dataset)
-
     # train the model
     model = models_keras.build_unet(
         encoder='resnet18',
         pretrained=True,
         use_elevation=USE_ELEVATION,
+        activation=keras.layers.LeakyReLU
     )
     
     # plot model architecture
     keras.utils.plot_model(model, to_file='model_architecture.png', show_shapes=True, dpi=100)
     print("Model architecture saved to model_architecture.png")
+    model.summary()
     
-    training_keras.train_model(dataset, model, use_elevation=USE_ELEVATION)
+    training_keras.train_model(dataset, model, use_elevation=USE_ELEVATION, bs=1, epochs=1)
 
     # use the train model to run inference on all test scenes
     inference_keras.run_inference(dataset, model=model, use_elevation=USE_ELEVATION)
