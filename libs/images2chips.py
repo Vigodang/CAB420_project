@@ -2,10 +2,10 @@ import cv2
 import os
 import numpy as np
 
-from libs.config import split_scene_ids_from_index, LABELMAP, INV_LABELMAP
+from libs.config import split_scene_ids_from_index, LABELMAP, INV_LABELMAP, SIZE
 
-size   = 300
-stride = 300
+size   = SIZE
+stride = SIZE
 
 def color2class(orthochip, img):
     ret = np.zeros((img.shape[0], img.shape[1]), dtype='uint8')
