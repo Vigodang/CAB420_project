@@ -4,7 +4,7 @@ import math
 from keras import models
 import os
 
-from libs.config import get_dataset_split_ids, LABELMAP_RGB, USE_ELEVATION
+from libs.config import get_dataset_split_ids, LABELMAP_RGB, USE_ELEVATION, SIZE
 
 def category2mask(img):
     """ Convert a category image to color mask """
@@ -20,7 +20,7 @@ def category2mask(img):
 
     return mask
 
-def chips_from_image(img, size=300):
+def chips_from_image(img, size=SIZE):
     shape = img.shape
 
     chips = []
@@ -34,7 +34,7 @@ def chips_from_image(img, size=300):
             chips.append((chip, x, y))
     return chips
 
-def run_inference_on_file(imagefile, predsfile, model, size=300, use_elevation=True, elevafile=None):
+def run_inference_on_file(imagefile, predsfile, model, size=SIZE, use_elevation=True, elevafile=None):
     with Image.open(imagefile).convert('RGB') as img:
         nimg = np.array(img)
         shape = nimg.shape
