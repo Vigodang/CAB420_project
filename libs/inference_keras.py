@@ -1,112 +1,236 @@
+from keras import Sequential
+from keras.layers import Layer, RandomFlip, RandomRotation
+from keras.utils import Sequence, to_categorical
 from PIL import Image
+
+from pathlib import Path
 import numpy as np
-import math
-from keras import models
-import os
+import random
+import tensorflow as tf
 
-from libs.config import get_dataset_split_ids, LABELMAP_RGB, USE_ELEVATION, SIZE
+BASE_AUGMENTATION = Sequential([
+    RandomFlip('horizontal_and_vertical'),
+    RandomRotation(0.5, interpolation='bilinear', fill_mode='reflect')
+])
 
-def category2mask(img):
-    """ Convert a category image to color mask """
-    if len(img) == 3:
-        if img.shape[2] == 3:
-            img = img[:, :, 0]
+def apply_colour_augmentation(images):
+    """Colour augmentation on RGB images only — never call on elevation data."""
+    images = tf.cast(images, tf.float32) / 255.0
+    images = tf.image.random_brightness(images, max_delta=0.2)   # ±20% — time of day variation
+    images = tf.image.random_contrast(images, lower=0.85, upper=1.15)  # ±15% — fine
+    images = tf.image.random_saturation(images, lower=0.8, upper=1.2)  # ±20% — consistent sensor
+    images = tf.image.random_hue(images, max_delta=0.08)          # ±8° — helps water/vegetation
+    images = tf.clip_by_value(images, 0.0, 1.0)
+    return (images * 255.0).numpy().astype(np.uint8)
 
-    mask = np.zeros(img.shape[:2] + (3, ), dtype='uint8')
+def load_dataset(dataset, bs, use_elevation=True, aug=BASE_AUGMENTATION, colour_aug=True):
+    train_image_files, train_eleva_files = _expand_split_chips(dataset, 'train.txt', use_elevation)
+    valid_image_files, valid_eleva_files = _expand_split_chips(dataset, 'valid.txt', use_elevation)
 
-    for category, mask_color in LABELMAP_RGB.items():
-        locs = np.where(img == category)
-        mask[locs] = mask_color
+    image_augmenter = _resolve_augmentation(aug)
+    label_augmenter = _build_label_augmentation(image_augmenter)
+    
+    train_seq = SegmentationSequence(
+        dataset,
+        train_image_files,
+        train_eleva_files,
+        image_augmenter,
+        label_augmenter,
+        bs,
+        use_elevation,
+        colour_aug=colour_aug  # only on training
+    )
+    
+    valid_seq = SegmentationSequence(
+        dataset,
+        valid_image_files,
+        valid_eleva_files,
+        None,
+        None,
+        bs,
+        use_elevation,
+        colour_aug=False  # never augment validation
+    )
+    
+    return train_seq, valid_seq
 
-    return mask
 
-def chips_from_image(img, size=SIZE):
-    shape = img.shape
+def _resolve_augmentation(aug):
+    if aug is False or aug == [] or aug is None:
+        return None
 
-    chips = []
-    for x in range(0, shape[1], size):
-        for y in range(0, shape[0], size):
-            chip = img[y:y+size, x:x+size]
-            y_pad = size - chip.shape[0]
-            x_pad = size - chip.shape[1]
-            pad_width = [(0, y_pad), (0, x_pad)] + [(0, 0)] * (chip.ndim - 2)
-            chip = np.pad(chip, pad_width, mode='constant')
-            chips.append((chip, x, y))
-    return chips
+    if isinstance(aug, Sequential):
+        return aug
 
-def run_inference_on_file(imagefile, predsfile, model, size=SIZE, use_elevation=True, elevafile=None):
-    with Image.open(imagefile).convert('RGB') as img:
-        nimg = np.array(img)
-        shape = nimg.shape
+    raise ValueError('aug must be None, False, an empty list, or a keras.Sequential instance')
 
-    elevation_chips = None
-    if use_elevation:
-        if elevafile is None:
-            raise ValueError('elevafile must be provided when use_elevation=True')
-        if not os.path.exists(elevafile):
-            raise FileNotFoundError(f'Elevation file not found: {elevafile}')
 
-        with Image.open(elevafile) as elev_img:
-            ne = np.array(elev_img.convert('L'))
-        elevation_chips = chips_from_image(ne, size=size)
+def _is_label_safe_layer(layer):
+    name = layer.__class__.__name__
+    return name in {
+        'RandomFlip',
+        'RandomRotation',
+        'RandomTranslation',
+        'RandomZoom',
+        'RandomCrop',
+        'CenterCrop'
+    }
 
-    image_chips = chips_from_image(nimg, size=size)
 
-    if use_elevation:
-        if len(image_chips) != len(elevation_chips):
-            raise ValueError('Image and elevation chips count mismatch')
+def _clone_layer_for_labels(layer):
+    config = layer.get_config()
+    if 'interpolation' in config:
+        config['interpolation'] = 'nearest'
+    return layer.__class__.from_config(config)
 
-        chips = []
-        for (img_chip, xi, yi), (eleva_chip, xe, ye) in zip(image_chips, elevation_chips):
-            if xi != xe or yi != ye:
-                raise ValueError('Mismatched chip coordinates between image and elevation')
-            if eleva_chip.ndim == 2:
-                eleva_chip = eleva_chip[..., np.newaxis]
-            chips.append((np.concatenate([img_chip, eleva_chip], axis=-1), xi, yi))
-    else:
-        chips = image_chips
 
-    chips = [(chip, xi, yi) for chip, xi, yi in chips if chip.sum() > 0]
-    if not chips:
-        raise ValueError(f'No valid chips generated for {imagefile}')
+def _build_label_augmentation(image_augmenter):
+    if image_augmenter is None:
+        return None
 
-    prediction = np.zeros(shape[:2], dtype='uint8')
-    #chip_preds = model.predict(np.array([chip for chip, _, _ in chips]), verbose=True)
-    images = np.array([chip[..., :3] for chip, _, _ in chips])
-    elevas = np.array([chip[..., 3:] for chip, _, _ in chips])
+    safe_layers = []
+    for layer in image_augmenter.layers:
+        if _is_label_safe_layer(layer):
+            safe_layers.append(_clone_layer_for_labels(layer))
 
-    chip_preds = model.predict([images, elevas], verbose=True)
+    return Sequential(safe_layers) if safe_layers else None
 
-    for (chip, x, y), pred in zip(chips, chip_preds):
-        category_chip = np.argmax(pred, axis=-1) + 1
-        section = prediction[y:y+size, x:x+size].shape
-        prediction[y:y+size, x:x+size] = category_chip[:section[0], :section[1]]
 
-    mask = category2mask(prediction)
-    Image.fromarray(mask).save(predsfile)
+def _resolve_split_file(dataset, filename):
+    path = Path(dataset) / filename
+    if path.exists():
+        return path
+    if filename == 'valid.txt':
+        alt = Path(dataset) / 'val.txt'
+        if alt.exists():
+            return alt
+    raise FileNotFoundError(f'Split file not found: {dataset}/{filename}')
 
-def run_inference(dataset, model=None, model_path=None, basedir='predictions', use_elevation=True):
-    if not os.path.isdir(basedir):
-        os.mkdir(basedir)
-    if model is None and model_path is None:
-        raise Exception("model or model_path required")
 
-    if model is None:
-        model = models.load_model(model_path)
+def _expand_split_chips(dataset, split_file, use_elevation=True):
+    split_path = _resolve_split_file(dataset, split_file)
+    scenes = load_lines(str(split_path))
+    image_files = []
+    eleva_files = []
 
-    if use_elevation is None:
-        use_elevation = USE_ELEVATION
+    for scene in scenes:
+        image_matches = sorted(Path(dataset, 'image-chips').glob(f'{scene}-*.png'))
 
-    train_ids, val_ids, test_ids = get_dataset_split_ids(dataset)
-    for scene in train_ids + val_ids + test_ids:
-        imagefile = f'{dataset}/images/{scene}-ortho.tif'
-        predsfile = os.path.join(basedir, f'{scene}-prediction.png')
-        elevafile = f'{dataset}/elevations/{scene}-elev.tif' if use_elevation else None
+        if not image_matches:
+            raise FileNotFoundError(f'No image chips found for scene "{scene}" in {dataset}/image-chips')
 
-        if not os.path.exists(imagefile):
-            continue
-        if use_elevation and not os.path.exists(elevafile):
-            raise FileNotFoundError(f'Elevation file required by config but not found: {elevafile}')
+        image_files.extend(str(p) for p in image_matches)
 
-        print(f'running inference on image {imagefile}.')
-        run_inference_on_file(imagefile, predsfile, model, use_elevation=use_elevation, elevafile=elevafile)
+        if use_elevation:
+            eleva_matches = sorted(Path(dataset, 'eleva-chips').glob(f'{scene}-*.png'))
+            if len(image_matches) != len(eleva_matches):
+                raise ValueError(
+                    f'Mismatched chip counts for scene "{scene}" in {dataset}: '
+                    f'{len(image_matches)} image chips vs {len(eleva_matches)} elevation chips'
+                )
+            eleva_files.extend(str(p) for p in eleva_matches)
+
+    return image_files, eleva_files
+
+def load_lines(fname):
+    with open(fname, 'r') as f:
+        return [l.strip() for l in f.readlines()]
+
+def load_img(fname):
+    return np.array(Image.open(fname))
+
+def mask_to_classes(mask, fname=None, num_classes=6):
+    if mask.ndim == 3:
+        mask = mask[:, :, 0]
+
+    mask = mask.astype(np.int64)
+    values = np.unique(mask)
+    bad_values = values[(values < 0) | (values >= num_classes)]
+
+    if bad_values.size > 0:
+        raise ValueError(
+            f'{fname or "mask"} contains invalid class IDs '
+            f'{bad_values[:20].tolist()} '
+            f'(min={mask.min()}, max={mask.max()}). '
+            f'Expected only 0..{num_classes - 1}.'
+        )
+
+    return to_categorical(mask, num_classes)
+
+
+class SegmentationSequence(Sequence):
+    def __init__(self, dataset, image_files, eleva_files, image_augmenter, label_augmenter, bs, use_elevation=True, colour_aug=True):
+        if use_elevation:
+            assert len(image_files) == len(eleva_files), 'image and eleva chip counts must match'
+            self.samples = list(zip(image_files, eleva_files))
+        else:
+            assert not eleva_files, 'Elevation files must be empty when use_elevation is False'
+            self.samples = list(image_files)
+
+        self.use_elevation = use_elevation
+        self.label_path = Path(dataset) / 'label-chips'
+        self.image_path = Path(dataset) / 'image-chips'
+        self.eleva_path = Path(dataset) / 'eleva-chips'
+        self.colour_aug = colour_aug
+        random.shuffle(self.samples)
+
+        self.image_augmenter = image_augmenter
+        self.label_augmenter = label_augmenter
+        self.bs = bs
+
+    def __len__(self):
+        return int(np.ceil(len(self.samples) / float(self.bs)))
+
+    def __getitem__(self, idx):
+        batch = self.samples[idx*self.bs:(idx+1)*self.bs]
+        if self.use_elevation:
+            image_files = [img for img, _ in batch]
+            eleva_files = [ele for _, ele in batch]
+        else:
+            image_files = batch
+            eleva_files = []
+
+        label_files = [str(self.label_path / Path(fname).name) for fname in image_files]
+        images = [load_img(fname) for fname in image_files]
+        if self.use_elevation:
+            elevas = [load_img(fname) for fname in eleva_files]
+            images = np.array(images)
+            elevas = np.array([el[..., np.newaxis] if el.ndim == 2 else el[..., :1] for el in elevas])
+        else:
+            images = np.array(images)
+            elevas = None
+
+        labels = np.array([mask_to_classes(load_img(fname)) for fname in label_files])
+
+        if self.image_augmenter is not None and self.label_augmenter is not None:
+            seed = random.randint(0, 2**31 - 1)
+            if self.use_elevation:
+                combined = np.concatenate([images, elevas], axis=-1)
+                combined = self.image_augmenter(combined, training=True, seed=seed).numpy()
+                images = combined[..., :3]
+                elevas = combined[..., 3:]  # elevation untouched by colour ops
+            else:
+                images = self.image_augmenter(images, training=True, seed=seed).numpy()
+            labels = self.label_augmenter(labels, training=True, seed=seed).numpy()
+
+        # Colour augmentation applied to RGB only — after spatial augmentation, never on elevation
+        if self.colour_aug:
+            images = apply_colour_augmentation(images)
+
+        if self.use_elevation:
+            return (images, elevas), labels
+        return images, labels
+
+    def _stack_elevation(self, image, eleva):
+        if eleva.ndim == 2:
+            eleva = eleva[..., np.newaxis]
+        elif eleva.ndim == 3 and eleva.shape[2] > 1:
+            eleva = eleva[..., :1]
+
+        if image.ndim == 2:
+            image = np.stack([image] * 3, axis=-1)
+
+        return np.concatenate([image, eleva], axis=-1)
+
+    def on_epoch_end(self):
+        random.shuffle(self.samples)
